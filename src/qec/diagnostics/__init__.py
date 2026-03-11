@@ -23,7 +23,16 @@ spectral–BP attractor alignment diagnostics,
 spectral failure risk scoring,
 BP stability prediction,
 instability sensitivity maps,
-and ASCII phase heatmap output
+ASCII phase heatmap output,
+spectral mode entropy,
+NB spectral gap,
+Bethe Hessian stability margin,
+effective support dimension,
+NB spectral curvature,
+cycle space density,
+ternary stability classification,
+composite instability scoring,
+and graph repair suggestions
 for BP convergence traces.
 Does not modify decoder internals.
 """
@@ -78,3 +87,15 @@ from .spectral_incremental import (
     identify_affected_nb_edges,
     score_repair_candidate_incremental,
 )
+from .spectral_entropy import compute_spectral_mode_entropy
+from .nb_spectral_gap import compute_nb_spectral_gap
+from .bethe_hessian_margin import compute_bethe_hessian_margin
+from .effective_support_dimension import compute_effective_support_dimension
+from .spectral_curvature import estimate_nb_spectral_curvature
+from .cycle_space_density import compute_cycle_space_density
+from .stability_classifier import (
+    classify_tanner_graph_stability,
+    classify_from_parity_check,
+)
+from .instability_score import compute_instability_score
+from .repair_suggestions import suggest_graph_repairs
