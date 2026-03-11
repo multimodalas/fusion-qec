@@ -5,6 +5,9 @@ Analyzes the sign structure of the dominant NB eigenvector to detect
 frustrated subgraphs.  Sign disagreements along edges indicate
 potential trapping-set boundaries where BP messages may oscillate.
 
+Frustrated edges are grouped into connected clusters for downstream
+localization and repair targeting.
+
 Layer 3 — Diagnostics.
 Does not import or modify the decoder (Layer 1).
 Does not import from experiments (Layer 5) or bench (Layer 6).
@@ -24,6 +27,53 @@ from src.qec.diagnostics.spectral_nb import _TannerGraph, compute_nb_spectrum
 _ROUND = 12
 
 
+def _find_clusters(
+    edges: list[tuple[int, int]],
+) -> list[list[tuple[int, int]]]:
+    """Group edges into connected components via union-find.
+
+    Two edges share a cluster if they share a node.
+    Returns deterministically sorted clusters.
+    """
+    if not edges:
+        return []
+
+    # Collect all nodes
+    parent: dict[int, int] = {}
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            # Deterministic: smaller root becomes parent
+            if ra < rb:
+                parent[rb] = ra
+            else:
+                parent[ra] = rb
+
+    for u, v in edges:
+        parent.setdefault(u, u)
+        parent.setdefault(v, v)
+        union(u, v)
+
+    # Group edges by root
+    groups: dict[int, list[tuple[int, int]]] = {}
+    for u, v in edges:
+        root = find(u)
+        groups.setdefault(root, []).append((u, v))
+
+    # Sort clusters deterministically: by smallest root, edges sorted within
+    return [
+        sorted(groups[root])
+        for root in sorted(groups.keys())
+    ]
+
+
 def detect_nb_sign_patterns(
     H: np.ndarray,
 ) -> dict[str, Any]:
@@ -33,6 +83,8 @@ def detect_nb_sign_patterns(
     of the corresponding directed-edge eigenvector components.  An
     edge is "frustrated" if the two directed components (u->v) and
     (v->u) have opposite signs.
+
+    Frustrated edges are then grouped into connected clusters.
 
     Parameters
     ----------
@@ -48,6 +100,12 @@ def detect_nb_sign_patterns(
         - ``num_concordant_edges`` : int — edges with sign agreement
         - ``frustration_ratio`` : float — fraction of frustrated edges
         - ``num_undirected_edges`` : int — total undirected edges
+        - ``frustrated_clusters`` : list[dict] — detected frustrated clusters
+              Each cluster dict contains:
+              - ``edges`` : list of [u, v] pairs
+              - ``nodes`` : sorted list of node indices
+              - ``size`` : number of edges in cluster
+        - ``num_clusters`` : int — number of frustrated clusters
     """
     H_arr = np.asarray(H, dtype=np.float64)
 
@@ -73,6 +131,7 @@ def detect_nb_sign_patterns(
 
     num_frustrated = 0
     num_concordant = 0
+    frustrated_edge_list: list[tuple[int, int]] = []
 
     for u, v in undirected_edges:
         idx_uv = edge_index.get((u, v))
@@ -86,6 +145,7 @@ def detect_nb_sign_patterns(
 
         if sign_uv * sign_vu < 0:
             num_frustrated += 1
+            frustrated_edge_list.append((min(u, v), max(u, v)))
         else:
             num_concordant += 1
 
@@ -94,9 +154,22 @@ def detect_nb_sign_patterns(
         num_frustrated / num_undirected if num_undirected > 0 else 0.0
     )
 
+    # Cluster frustrated edges by connectivity
+    raw_clusters = _find_clusters(frustrated_edge_list)
+    frustrated_clusters = []
+    for cluster_edges in raw_clusters:
+        nodes = sorted({n for e in cluster_edges for n in e})
+        frustrated_clusters.append({
+            "edges": [list(e) for e in cluster_edges],
+            "nodes": nodes,
+            "size": len(cluster_edges),
+        })
+
     return {
         "num_frustrated_edges": num_frustrated,
         "num_concordant_edges": num_concordant,
         "frustration_ratio": round(float(frustration_ratio), _ROUND),
         "num_undirected_edges": num_undirected,
+        "frustrated_clusters": frustrated_clusters,
+        "num_clusters": len(frustrated_clusters),
     }

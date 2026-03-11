@@ -54,9 +54,8 @@ def detect_nb_localization(
 
         - ``localized`` : bool — True if dominant mode is localized
         - ``ipr`` : float — IPR of the dominant eigenvector
-        - ``ipr_threshold`` : float — threshold used
-        - ``num_hot_edges`` : int — edges with energy above mean
-        - ``hot_edge_fraction`` : float — fraction of edges that are hot
+        - ``localized_edges`` : list[int] — edge indices with above-mean energy
+        - ``num_localized_edges`` : int — count of localized edges
     """
     H_arr = np.asarray(H, dtype=np.float64)
 
@@ -69,16 +68,17 @@ def detect_nb_localization(
 
     if num_edges > 0:
         mean_energy = float(np.mean(edge_energy))
-        num_hot = int(np.sum(edge_energy > mean_energy))
-        hot_fraction = num_hot / num_edges
+        # Deterministic: sorted edge indices with above-mean energy
+        localized_edges = sorted(
+            int(i) for i in range(num_edges)
+            if edge_energy[i] > mean_energy
+        )
     else:
-        num_hot = 0
-        hot_fraction = 0.0
+        localized_edges = []
 
     return {
         "localized": localized,
         "ipr": round(float(ipr), _ROUND),
-        "ipr_threshold": round(float(ipr_threshold), _ROUND),
-        "num_hot_edges": num_hot,
-        "hot_edge_fraction": round(float(hot_fraction), _ROUND),
+        "localized_edges": localized_edges,
+        "num_localized_edges": len(localized_edges),
     }

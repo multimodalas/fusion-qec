@@ -1,0 +1,4 @@
+*.lock merge=ours
+*.json merge=ours
+*.md merge=union
+src/qec/**/__init__.py merge=union
