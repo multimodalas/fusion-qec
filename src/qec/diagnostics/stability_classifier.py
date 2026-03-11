@@ -22,10 +22,7 @@ from typing import Any
 
 import numpy as np
 
-from src.qec.diagnostics.spectral_nb import compute_nb_spectrum
-from src.qec.diagnostics.spectral_entropy import compute_spectral_mode_entropy
-from src.qec.diagnostics.nb_spectral_gap import compute_nb_spectral_gap
-from src.qec.diagnostics.bethe_hessian_margin import compute_bethe_hessian_margin
+from src.qec.diagnostics.compute_spectral_metrics import compute_spectral_metrics
 
 
 _ROUND = 12
@@ -118,19 +115,8 @@ def classify_from_parity_check(H: np.ndarray) -> dict[str, Any]:
     """
     H_arr = np.asarray(H, dtype=np.float64)
 
-    # Compute spectral diagnostics
-    nb = compute_nb_spectrum(H_arr)
-    entropy = compute_spectral_mode_entropy(nb["eigenvector"])
-    gap_result = compute_nb_spectral_gap(H_arr)
-    margin_result = compute_bethe_hessian_margin(H_arr)
-
-    metrics = {
-        "spectral_radius": nb["spectral_radius"],
-        "entropy": entropy,
-        "sis": nb["sis"],
-        "spectral_gap": gap_result["spectral_gap"],
-        "bethe_margin": margin_result["bethe_margin"],
-    }
+    # Compute all spectral diagnostics via aggregator
+    metrics = compute_spectral_metrics(H_arr)
 
     stability_class = classify_tanner_graph_stability(metrics)
 
@@ -139,9 +125,9 @@ def classify_from_parity_check(H: np.ndarray) -> dict[str, Any]:
     return {
         "stability_class": stability_class,
         "stability_label": label_map[stability_class],
-        "spectral_radius": round(nb["spectral_radius"], _ROUND),
-        "entropy": round(entropy, _ROUND),
-        "sis": round(nb["sis"], _ROUND),
-        "spectral_gap": round(gap_result["spectral_gap"], _ROUND),
-        "bethe_margin": round(margin_result["bethe_margin"], _ROUND),
+        "spectral_radius": metrics["spectral_radius"],
+        "entropy": metrics["entropy"],
+        "sis": metrics["sis"],
+        "spectral_gap": metrics["spectral_gap"],
+        "bethe_margin": metrics["bethe_margin"],
     }

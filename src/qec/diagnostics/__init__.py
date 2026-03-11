@@ -99,3 +99,4 @@ from .stability_classifier import (
 )
 from .instability_score import compute_instability_score
 from .repair_suggestions import suggest_graph_repairs
+from .compute_spectral_metrics import compute_spectral_metrics
