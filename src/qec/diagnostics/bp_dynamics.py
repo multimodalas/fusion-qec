@@ -84,6 +84,8 @@ def _compute_msi(
     llr_trace: List[np.ndarray],
     energy_trace: list,
     params: Dict[str, Any],
+    *,
+    _sign_cache: Optional[List[np.ndarray]] = None,
 ) -> Dict[str, Any]:
     """MSI — Metastability Index.
 
@@ -111,12 +113,16 @@ def _compute_msi(
     if w_llr < 2:
         flip_rate = 0.0
     else:
-        tail_llr = llr_trace[-w_llr:]
+        # INV-002: reuse precomputed sign vectors when available
+        if _sign_cache is not None:
+            tail_signs = _sign_cache[-w_llr:]
+        else:
+            tail_signs = [_sign(v) for v in llr_trace[-w_llr:]]
         total_flips = 0
         total_vars = 0
-        for t in range(1, len(tail_llr)):
-            s_prev = _sign(tail_llr[t - 1])
-            s_curr = _sign(tail_llr[t])
+        for t in range(1, len(tail_signs)):
+            s_prev = tail_signs[t - 1]
+            s_curr = tail_signs[t]
             total_flips += int(np.sum(s_prev != s_curr))
             total_vars += len(s_prev)
         flip_rate = float(total_flips) / max(total_vars, 1)
@@ -135,6 +141,8 @@ def _compute_msi(
 def _compute_cpi(
     llr_trace: List[np.ndarray],
     params: Dict[str, Any],
+    *,
+    _crc32_cache: Optional[List[int]] = None,
 ) -> Dict[str, Any]:
     """CPI — Cycle Periodicity Index.
 
@@ -150,14 +158,16 @@ def _compute_cpi(
 
     tail = llr_trace[-w:]
 
-    # Build deterministic signatures from sign vectors using CRC32
-    signatures: List[int] = []
-    for vec in tail:
-        sign_vec = _sign(vec)
-        # Pack signs as bytes for CRC32
-        sign_bytes = sign_vec.astype(np.int8).tobytes()
-        sig = zlib.crc32(sign_bytes) & 0xFFFFFFFF
-        signatures.append(sig)
+    # INV-002: reuse precomputed CRC32 signatures when available
+    if _crc32_cache is not None:
+        signatures = _crc32_cache[-w:]
+    else:
+        signatures: List[int] = []
+        for vec in tail:
+            sign_vec = _sign(vec)
+            sign_bytes = sign_vec.astype(np.int8).tobytes()
+            sig = zlib.crc32(sign_bytes) & 0xFFFFFFFF
+            signatures.append(sig)
 
     # If all signatures are identical, there is no oscillation.
     unique_sigs = set(signatures)
@@ -306,6 +316,8 @@ def _compute_cvne(
 def _compute_gos(
     llr_trace: List[np.ndarray],
     params: Dict[str, Any],
+    *,
+    _sign_cache: Optional[List[np.ndarray]] = None,
 ) -> Dict[str, Any]:
     """GOS — Global Oscillation Score.
 
@@ -326,10 +338,15 @@ def _compute_gos(
                 f"GOS llr length mismatch in tail window: "
                 f"expected {n_vars}, got {len(vec)} at tail_index={i}"
             )
+    # INV-002: reuse precomputed sign vectors when available
+    if _sign_cache is not None:
+        tail_signs = _sign_cache[-w:]
+    else:
+        tail_signs = [_sign(v) for v in tail]
     flips = np.zeros(n_vars, dtype=np.int32)
-    for t in range(1, len(tail)):
-        s_prev = _sign(tail[t - 1])
-        s_curr = _sign(tail[t])
+    for t in range(1, len(tail_signs)):
+        s_prev = tail_signs[t - 1]
+        s_curr = tail_signs[t]
         flips += (s_prev != s_curr).astype(np.int32)
 
     max_possible = w - 1
@@ -380,6 +397,8 @@ def _compute_bti(
     energy_trace: list,
     llr_trace: List[np.ndarray],
     params: Dict[str, Any],
+    *,
+    _crc32_cache: Optional[List[int]] = None,
 ) -> Dict[str, Any]:
     """BTI — Basin Transition Indicator.
 
@@ -407,11 +426,15 @@ def _compute_bti(
     w_llr = min(W, n_llr)
     sig_changes = 0
     if w_llr >= 2:
-        tail_llr = llr_trace[-w_llr:]
-        sigs: List[int] = []
-        for vec in tail_llr:
-            sign_bytes = _sign(vec).astype(np.int8).tobytes()
-            sigs.append(zlib.crc32(sign_bytes) & 0xFFFFFFFF)
+        # INV-002: reuse precomputed CRC32 signatures when available
+        if _crc32_cache is not None:
+            sigs = _crc32_cache[-w_llr:]
+        else:
+            tail_llr = llr_trace[-w_llr:]
+            sigs: List[int] = []
+            for vec in tail_llr:
+                sign_bytes = _sign(vec).astype(np.int8).tobytes()
+                sigs.append(zlib.crc32(sign_bytes) & 0xFFFFFFFF)
         for i in range(1, len(sigs)):
             if sigs[i] != sigs[i - 1]:
                 sig_changes += 1
@@ -622,15 +645,34 @@ def compute_bp_dynamics_metrics(
                     f"got {len(vec)} at iteration {i}"
                 )
 
+    # ── QSOL-BP-INV-002: Shared sign-vector precomputation ─────────
+    # When tail_window == gos_window == bti_window (the default),
+    # sign vectors and CRC32 signatures for the common tail are
+    # identical pure-function evaluations.  Precompute once, reuse
+    # across MSI, CPI, GOS, and BTI to eliminate redundant work.
+    _sign_cache: Optional[List[np.ndarray]] = None
+    _crc32_cache: Optional[List[int]] = None
+    _windows_equal = (
+        p["tail_window"] == p["gos_window"] == p["bti_window"]
+    )
+    if _windows_equal and len(normed_llr) >= 2:
+        _w = min(p["tail_window"], len(normed_llr))
+        _tail = normed_llr[-_w:]
+        _sign_cache = [_sign(v) for v in _tail]
+        _crc32_cache = [
+            zlib.crc32(s.astype(np.int8).tobytes()) & 0xFFFFFFFF
+            for s in _sign_cache
+        ]
+
     # Compute all metrics
-    msi = _compute_msi(normed_llr, energy_trace, p)
-    cpi = _compute_cpi(normed_llr, p)
+    msi = _compute_msi(normed_llr, energy_trace, p, _sign_cache=_sign_cache)
+    cpi = _compute_cpi(normed_llr, p, _crc32_cache=_crc32_cache)
     tsl = _compute_tsl(normed_llr, p)
     lec = _compute_lec(energy_trace, p)
     cvne = _compute_cvne(correction_vectors, p)
-    gos = _compute_gos(normed_llr, p)
+    gos = _compute_gos(normed_llr, p, _sign_cache=_sign_cache)
     eds = _compute_eds(energy_trace, p)
-    bti = _compute_bti(energy_trace, normed_llr, p)
+    bti = _compute_bti(energy_trace, normed_llr, p, _crc32_cache=_crc32_cache)
 
     metrics = {
         "msi": msi["msi"],

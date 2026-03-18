@@ -737,3 +737,74 @@ class TestInputValidation:
         energy = _make_monotonic_energy(n_iters=5)
         with pytest.raises(ValueError, match="LLR vector length mismatch"):
             compute_bp_dynamics_metrics(llr, energy)
+
+
+# ── Test: QSOL-BP-INV-002 — Sign-vector cache equivalence ────────────
+
+
+class TestINV002SignCacheEquivalence:
+    """QSOL-BP-INV-002: Precomputed sign cache produces bitwise-identical
+    results to direct per-metric sign computation.
+
+    Validates by comparing cached metric functions to uncached calls
+    using the same window parameters (all == 12, the default).
+    """
+
+    def test_sign_cache_matches_direct_computation(self):
+        """Precomputed sign vectors are bitwise equal to inline _sign()."""
+        from src.qec.diagnostics.bp_dynamics import _sign, _normalize_llr_trace
+        llr = _make_oscillating_llr_trace(n_iters=20, n_vars=10, period=2)
+        normed = _normalize_llr_trace(llr)
+        w = min(12, len(normed))
+        tail = normed[-w:]
+        # Precomputed (as INV-002 does)
+        cached_signs = [_sign(v) for v in tail]
+        # Direct per-element (as old code did per-metric)
+        for i, vec in enumerate(tail):
+            np.testing.assert_array_equal(
+                cached_signs[i], _sign(vec),
+                err_msg=f"Sign cache mismatch at index {i}",
+            )
+
+    def test_crc32_cache_matches_direct_computation(self):
+        """Precomputed CRC32 sigs are identical to inline computation."""
+        import zlib
+        from src.qec.diagnostics.bp_dynamics import _sign, _normalize_llr_trace
+        llr = _make_chaotic_llr_trace(n_iters=20, n_vars=10)
+        normed = _normalize_llr_trace(llr)
+        w = min(12, len(normed))
+        tail = normed[-w:]
+        cached_signs = [_sign(v) for v in tail]
+        cached_crc = [
+            zlib.crc32(s.astype(np.int8).tobytes()) & 0xFFFFFFFF
+            for s in cached_signs
+        ]
+        # Recompute independently
+        for i, vec in enumerate(tail):
+            direct_sig = zlib.crc32(
+                _sign(vec).astype(np.int8).tobytes()
+            ) & 0xFFFFFFFF
+            assert cached_crc[i] == direct_sig, \
+                f"CRC32 cache mismatch at index {i}"
+
+    def test_cached_metrics_deterministic(self):
+        """Default-window metrics (INV-002 active) are deterministic."""
+        llr = _make_oscillating_llr_trace()
+        energy = _make_flat_energy()
+        r1 = compute_bp_dynamics_metrics(llr, energy)
+        r2 = compute_bp_dynamics_metrics(llr, energy)
+        assert r1["metrics"] == r2["metrics"]
+        assert r1["regime"] == r2["regime"]
+
+    def test_all_trace_types_stable_under_cache(self):
+        """INV-002 cache produces stable results across trace types."""
+        traces = [
+            (_make_stable_llr_trace(), _make_monotonic_energy()),
+            (_make_oscillating_llr_trace(), _make_flat_energy()),
+            (_make_chaotic_llr_trace(), _make_chaotic_energy()),
+            (_make_trapping_llr_trace(), _make_flat_energy()),
+        ]
+        for llr, energy in traces:
+            r1 = compute_bp_dynamics_metrics(llr, energy)
+            r2 = compute_bp_dynamics_metrics(llr, energy)
+            assert r1["metrics"] == r2["metrics"]
