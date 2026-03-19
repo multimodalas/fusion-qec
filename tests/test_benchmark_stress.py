@@ -25,6 +25,7 @@ from src.qec.experiments.benchmark_stress import (
     apply_decoder_genome,
     build_experiment_table,
     build_pairwise_comparison,
+    build_pareto_frontier,
     build_scores,
     classify_with_fallback,
     compute_dark_state_mask,
@@ -295,7 +296,7 @@ class TestJsonSerialization:
         json_str = results_to_json(results)
         parsed = json.loads(json_str)
         assert parsed["n_scenarios"] == 9
-        assert parsed["version"] == "v69.2.1"
+        assert parsed["version"] == "v69.9.4"
 
     def test_json_sorted_keys(self):
         results = run_benchmark_stress(n_vars=10, n_iters=8)
@@ -998,8 +999,176 @@ class TestPairwiseComparison:
             build_pairwise_comparison({})
 
 
+class TestParetoFrontier:
+    """Tests for Pareto frontier computation (v69.3.1)."""
+
+    def _run_sweep(self):
+        """Helper: run a sweep with 3 genomes."""
+        genomes = [
+            {"clip_value": 1.0, "damping": 0.0},
+            {"clip_value": 5.0, "damping": 0.3},
+            {"alphabet": "ternary", "damping": 0.1},
+        ]
+        return run_benchmark_stress(n_vars=10, n_iters=8, genomes=genomes)
+
+    def test_pareto_structure(self):
+        """Pareto dict has one entry per scenario, each a list of genome_ids."""
+        result = self._run_sweep()
+        pareto = result["pareto"]
+        assert isinstance(pareto, dict)
+        scenario_names = [name for name, _ in SCENARIOS]
+        assert set(pareto.keys()) == set(scenario_names)
+        for sc_name in scenario_names:
+            frontier = pareto[sc_name]
+            assert isinstance(frontier, list)
+            assert len(frontier) >= 1
+            for gid in frontier:
+                assert isinstance(gid, str)
+
+    def test_pareto_subset_of_genomes(self):
+        """All frontier genome_ids exist in the table."""
+        result = self._run_sweep()
+        pareto = result["pareto"]
+        table = result["table"]
+        all_genome_ids = {row["genome_id"] for row in table}
+        for sc_name, frontier in pareto.items():
+            for gid in frontier:
+                assert gid in all_genome_ids, (
+                    f"{sc_name}: frontier genome {gid} not in table"
+                )
+
+    def test_pareto_determinism(self):
+        """Repeated runs produce identical Pareto frontiers."""
+        genomes = [
+            {"clip_value": 1.0, "damping": 0.0},
+            {"clip_value": 5.0, "damping": 0.3},
+        ]
+        r1 = run_benchmark_stress(n_vars=10, n_iters=8, genomes=genomes)
+        r2 = run_benchmark_stress(n_vars=10, n_iters=8, genomes=genomes)
+        j1 = json.dumps(r1["pareto"], sort_keys=True)
+        j2 = json.dumps(r2["pareto"], sort_keys=True)
+        assert j1 == j2, "Pareto frontiers are not deterministic"
+
+    def test_pareto_single_genome(self):
+        """Single genome is always on the frontier."""
+        result = run_benchmark_stress(n_vars=10, n_iters=8)
+        pareto = result["pareto"]
+        for sc_name, frontier in pareto.items():
+            assert len(frontier) == 1, (
+                f"{sc_name}: expected 1 genome on frontier, got {len(frontier)}"
+            )
+
+    def test_pareto_dominated_genome(self):
+        """A genome dominated on all metrics is excluded from the frontier."""
+        # Genome B strictly dominates A on all metrics
+        synthetic_table = [
+            {
+                "genome_id": "aaa",
+                "scenario": "converging_baseline",
+                "version": "v1",
+                "base_seed_label": "test",
+                "n_vars": 10,
+                "n_iters_base": 8,
+                "metric_x": 1.0,
+                "metric_y": 2.0,
+            },
+            {
+                "genome_id": "bbb",
+                "scenario": "converging_baseline",
+                "version": "v1",
+                "base_seed_label": "test",
+                "n_vars": 10,
+                "n_iters_base": 8,
+                "metric_x": 3.0,
+                "metric_y": 4.0,
+            },
+        ]
+        result = {"table": synthetic_table}
+        pareto = build_pareto_frontier(result)
+        frontier = pareto["converging_baseline"]
+        assert "bbb" in frontier
+        assert "aaa" not in frontier
+
+    def test_pareto_non_dominated_pair(self):
+        """Two genomes that trade off are both on the frontier."""
+        synthetic_table = [
+            {
+                "genome_id": "aaa",
+                "scenario": "converging_baseline",
+                "version": "v1",
+                "base_seed_label": "test",
+                "n_vars": 10,
+                "n_iters_base": 8,
+                "metric_x": 5.0,
+                "metric_y": 1.0,
+            },
+            {
+                "genome_id": "bbb",
+                "scenario": "converging_baseline",
+                "version": "v1",
+                "base_seed_label": "test",
+                "n_vars": 10,
+                "n_iters_base": 8,
+                "metric_x": 1.0,
+                "metric_y": 5.0,
+            },
+        ]
+        result = {"table": synthetic_table}
+        pareto = build_pareto_frontier(result)
+        frontier = pareto["converging_baseline"]
+        assert "aaa" in frontier
+        assert "bbb" in frontier
+
+    def test_pareto_frontier_sorted(self):
+        """Frontier genome_ids are sorted lexicographically."""
+        result = self._run_sweep()
+        pareto = result["pareto"]
+        for sc_name, frontier in pareto.items():
+            assert frontier == sorted(frontier), (
+                f"{sc_name}: frontier not sorted: {frontier}"
+            )
+
+    def test_pareto_missing_table_raises(self):
+        """build_pareto_frontier raises on missing table."""
+        with pytest.raises(ValueError, match="missing 'table'"):
+            build_pareto_frontier({})
+
+    def test_pareto_unknown_scenario_raises(self):
+        """build_pareto_frontier raises on unknown scenario in table."""
+        synthetic_table = [
+            {
+                "genome_id": "aaa",
+                "scenario": "nonexistent_scenario",
+                "version": "v1",
+                "base_seed_label": "test",
+                "n_vars": 10,
+                "n_iters_base": 8,
+                "metric_x": 1.0,
+            },
+        ]
+        result = {"table": synthetic_table}
+        with pytest.raises(ValueError, match="Unknown scenario"):
+            build_pareto_frontier(result)
+
+    def test_pareto_no_numeric_metrics_raises(self):
+        """build_pareto_frontier raises when no valid numeric metrics exist."""
+        synthetic_table = [
+            {
+                "genome_id": "aaa",
+                "scenario": "converging_baseline",
+                "version": "v1",
+                "base_seed_label": "test",
+                "n_vars": 10,
+                "n_iters_base": 8,
+            },
+        ]
+        result = {"table": synthetic_table}
+        with pytest.raises(ValueError, match="No valid numeric metrics"):
+            build_pareto_frontier(result)
+
+
 class TestScoringLayer:
-    """Tests for deterministic scoring layer (v69.4.0)."""
+    """Tests for deterministic scoring layer (v69.9.4)."""
 
     def _run_sweep(self):
         """Helper: run a sweep with 3 genomes for reuse across tests."""

@@ -3,7 +3,7 @@
 Generates 9 synthetic scenarios, runs them through the diagnostics pipeline,
 and produces deterministic JSON-serializable results with fidelity metrics.
 
-Version: v69.2.1
+Version: v69.9.4
 """
 
 import hashlib
@@ -618,7 +618,7 @@ def _run_single_genome_suite(
         result["seed"] = seed
         results.append(result)
     return {
-        "version": "v69.2.1",
+        "version": "v69.9.4",
         "base_seed_label": base_seed_label,
         "n_vars": n_vars,
         "n_iters_base": n_iters,
@@ -630,7 +630,7 @@ def _run_single_genome_suite(
 def run_benchmark_stress(
     n_vars: int = 50,
     n_iters: int = 30,
-    base_seed_label: str = "benchmark_stress_v69.2.1",
+    base_seed_label: str = "benchmark_stress_v69.9.4",
     genome: Optional[dict] = None,
     genomes: Optional[List[dict]] = None,
 ) -> dict:
@@ -668,6 +668,7 @@ def run_benchmark_stress(
         suite["mode"] = "single"
         suite["table"] = build_experiment_table(suite)
         suite["comparisons"] = build_pairwise_comparison(suite)
+        suite["pareto"] = build_pareto_frontier(suite)
         suite["scores"] = build_scores(suite)
         return suite
 
@@ -685,6 +686,7 @@ def run_benchmark_stress(
     }
     sweep_result["table"] = build_experiment_table(sweep_result)
     sweep_result["comparisons"] = build_pairwise_comparison(sweep_result)
+    sweep_result["pareto"] = build_pareto_frontier(sweep_result)
     sweep_result["scores"] = build_scores(sweep_result)
     return sweep_result
 
@@ -821,6 +823,110 @@ def build_pairwise_comparison(result: dict) -> list:
                 comparisons.append(comp)
 
     return comparisons
+
+
+def build_pareto_frontier(result: dict) -> dict:
+    """Identify Pareto-non-dominated genomes per scenario.
+
+    For each scenario, genome A dominates genome B iff A >= B on all
+    numeric metrics and A > B on at least one.  The Pareto frontier
+    is the set of non-dominated genomes.
+
+    Parameters
+    ----------
+    result : dict
+        Output of ``run_benchmark_stress``.  Must contain ``"table"`` key.
+
+    Returns
+    -------
+    dict
+        Mapping scenario_name → list of genome_id strings on the frontier,
+        in deterministic order (sorted lexicographically).
+
+    Raises
+    ------
+    ValueError
+        If ``result`` has no ``"table"`` key, if a scenario has no valid
+        numeric metrics, or if a scenario referenced in the table is unknown.
+    """
+    if "table" not in result:
+        raise ValueError("Result dict missing 'table' key")
+
+    table = result["table"]
+
+    # Group rows by scenario, preserving insertion order
+    scenario_groups: dict = defaultdict(list)
+    for row in table:
+        scenario_groups[row["scenario"]].append(row)
+
+    # Validate all scenarios in table are known
+    known_scenarios = {name for name, _ in SCENARIOS}
+    for sc_name in scenario_groups:
+        if sc_name not in known_scenarios:
+            raise ValueError(
+                f"Unknown scenario in table: {sc_name!r}"
+            )
+
+    pareto: dict = {}
+    for scenario, rows in scenario_groups.items():
+        # Extract numeric metric keys (exclude reserved keys, skip NaN)
+        metric_keys: list = []
+        for key in rows[0]:
+            if key in _EXCLUDED_KEYS:
+                continue
+            val = rows[0][key]
+            if isinstance(val, (int, float)) and not math.isnan(float(val)):
+                metric_keys.append(key)
+        metric_keys.sort()
+
+        if not metric_keys:
+            raise ValueError(
+                f"No valid numeric metrics for scenario {scenario!r}"
+            )
+
+        # Extract numeric vectors per genome row
+        genome_ids: list = []
+        vectors: list = []
+        for row in rows:
+            gid = row["genome_id"]
+            vec: list = []
+            for k in metric_keys:
+                v = row.get(k)
+                if isinstance(v, (int, float)) and not math.isnan(float(v)):
+                    vec.append(float(v))
+                else:
+                    vec.append(0.0)
+            genome_ids.append(gid)
+            vectors.append(vec)
+
+        # Determine non-dominated set
+        n = len(vectors)
+        dominated = [False] * n
+        for i in range(n):
+            if dominated[i]:
+                continue
+            for j in range(n):
+                if i == j or dominated[j]:
+                    continue
+                # Check if j dominates i: j >= i on all, j > i on at least one
+                all_geq = True
+                any_gt = False
+                for m in range(len(metric_keys)):
+                    if vectors[j][m] < vectors[i][m]:
+                        all_geq = False
+                        break
+                    if vectors[j][m] > vectors[i][m]:
+                        any_gt = True
+                if all_geq and any_gt:
+                    dominated[i] = True
+                    break
+
+        frontier = sorted(
+            genome_ids[i] for i in range(n) if not dominated[i]
+        )
+        pareto[scenario] = frontier
+
+    return pareto
 
 
 def build_scores(result: dict) -> dict:
