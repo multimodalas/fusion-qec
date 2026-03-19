@@ -5,33 +5,14 @@ Generates a small fixed dataset, runs the batch pipeline,
 prints a summary, and writes sonification_results.json.
 """
 
-import importlib.util
 import json
 import os
 import sys
 
-_src = os.path.join(os.path.dirname(__file__), "..", "src")
-sys.path.insert(0, _src)
+# Ensure repo root is on path (required for src.* transitive imports)
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-
-def _load(name, path):
-    """Load a module by file path, bypassing package __init__.py."""
-    spec = importlib.util.spec_from_file_location(name, path)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-# Load the three sonification modules directly (avoids broken __init__.py)
-_exp = os.path.join(_src, "qec", "experiments")
-_load("qec.experiments.sonification_interpretation",
-      os.path.join(_exp, "sonification_interpretation.py"))
-_load("qec.experiments.sonification_comparison",
-      os.path.join(_exp, "sonification_comparison.py"))
-_batch = _load("qec.experiments.sonification_batch",
-               os.path.join(_exp, "sonification_batch.py"))
-run_sonification_batch = _batch.run_sonification_batch
+from qec.experiments.sonification_batch import run_sonification_batch
 
 # Step 1 — fixed deterministic dataset
 results = [
