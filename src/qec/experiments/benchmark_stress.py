@@ -8,6 +8,7 @@ Version: v69.2.1
 
 import hashlib
 import json
+import math
 import struct
 import time
 from collections import defaultdict
@@ -667,6 +668,7 @@ def run_benchmark_stress(
         suite["mode"] = "single"
         suite["table"] = build_experiment_table(suite)
         suite["comparisons"] = build_pairwise_comparison(suite)
+        suite["scores"] = build_scores(suite)
         return suite
 
     # Sweep mode: deterministic sequential iteration
@@ -683,6 +685,7 @@ def run_benchmark_stress(
     }
     sweep_result["table"] = build_experiment_table(sweep_result)
     sweep_result["comparisons"] = build_pairwise_comparison(sweep_result)
+    sweep_result["scores"] = build_scores(sweep_result)
     return sweep_result
 
 
@@ -818,6 +821,115 @@ def build_pairwise_comparison(result: dict) -> list:
                 comparisons.append(comp)
 
     return comparisons
+
+
+def build_scores(result: dict) -> dict:
+    """Compute deterministic normalized scores and rankings per scenario.
+
+    For each scenario, extracts numeric metrics from the table rows,
+    applies min-max normalization per metric column, computes an
+    equal-weight mean score, and ranks genomes by score (descending),
+    with lexicographic genome_id tie-breaking.
+
+    Parameters
+    ----------
+    result : dict
+        Output of ``run_benchmark_stress``.  Must contain ``"table"`` key.
+
+    Returns
+    -------
+    dict
+        Mapping scenario_name → list of {genome_id, score, rank} dicts,
+        sorted by score descending then genome_id ascending.
+
+    Raises
+    ------
+    ValueError
+        If ``result`` has no ``"table"`` key.
+    """
+    if "table" not in result:
+        raise ValueError("Result dict missing 'table' key")
+
+    table = result["table"]
+
+    # Group rows by scenario, preserving insertion order
+    scenario_groups: dict = defaultdict(list)
+    for row in table:
+        scenario_groups[row["scenario"]].append(row)
+
+    scores: dict = {}
+    for scenario, rows in scenario_groups.items():
+        # Extract numeric metric keys (exclude reserved keys)
+        metric_keys: list = []
+        for key in rows[0]:
+            if key in _EXCLUDED_KEYS:
+                continue
+            val = rows[0][key]
+            if isinstance(val, (int, float)):
+                # Check it's a real number (not NaN)
+                if not math.isnan(float(val)):
+                    metric_keys.append(key)
+
+        # Sort metric keys for deterministic column order
+        metric_keys.sort()
+
+        # Collect values per metric column, filtering NaN per-row
+        col_values: dict = {k: [] for k in metric_keys}
+        for row in rows:
+            for k in metric_keys:
+                v = row.get(k)
+                if isinstance(v, (int, float)):
+                    fv = float(v)
+                    if not math.isnan(fv):
+                        col_values[k].append(fv)
+
+        # Compute min/max per column
+        col_min: dict = {}
+        col_max: dict = {}
+        for k in metric_keys:
+            vals = col_values[k]
+            if vals:
+                col_min[k] = min(vals)
+                col_max[k] = max(vals)
+
+        # Normalize and score each genome row
+        scored_rows: list = []
+        for row in rows:
+            norm_values: list = []
+            for k in metric_keys:
+                v = row.get(k)
+                if not isinstance(v, (int, float)):
+                    continue
+                fv = float(v)
+                if math.isnan(fv):
+                    continue
+                mn = col_min[k]
+                mx = col_max[k]
+                if mx == mn:
+                    norm_values.append(0.5)
+                else:
+                    norm_values.append((fv - mn) / (mx - mn))
+
+            if norm_values:
+                score = sum(norm_values) / len(norm_values)
+            else:
+                score = 0.5
+
+            scored_rows.append({
+                "genome_id": row["genome_id"],
+                "score": score,
+            })
+
+        # Sort: score descending, genome_id ascending (tie-break)
+        scored_rows.sort(key=lambda r: (-r["score"], r["genome_id"]))
+
+        # Assign ranks
+        for rank_idx, entry in enumerate(scored_rows, start=1):
+            entry["rank"] = rank_idx
+
+        scores[scenario] = scored_rows
+
+    return scores
 
 
 def results_to_json(results: dict) -> str:

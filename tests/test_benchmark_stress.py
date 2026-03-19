@@ -25,6 +25,7 @@ from src.qec.experiments.benchmark_stress import (
     apply_decoder_genome,
     build_experiment_table,
     build_pairwise_comparison,
+    build_scores,
     classify_with_fallback,
     compute_dark_state_mask,
     compute_fidelity,
@@ -995,3 +996,164 @@ class TestPairwiseComparison:
         """build_pairwise_comparison raises on missing table."""
         with pytest.raises(ValueError, match="missing 'table'"):
             build_pairwise_comparison({})
+
+
+class TestScoringLayer:
+    """Tests for deterministic scoring layer (v69.4.0)."""
+
+    def _run_sweep(self):
+        """Helper: run a sweep with 3 genomes for reuse across tests."""
+        genomes = [
+            {"clip_value": 1.0, "damping": 0.0},
+            {"clip_value": 5.0, "damping": 0.3},
+            {"alphabet": "ternary", "damping": 0.1},
+        ]
+        return run_benchmark_stress(n_vars=10, n_iters=8, genomes=genomes)
+
+    def test_score_structure(self):
+        """Scores dict has correct fields: one entry per genome per scenario."""
+        result = self._run_sweep()
+        scores = result["scores"]
+        assert isinstance(scores, dict)
+        scenario_names = [name for name, _ in SCENARIOS]
+        assert set(scores.keys()) == set(scenario_names)
+        for sc_name in scenario_names:
+            entries = scores[sc_name]
+            assert isinstance(entries, list)
+            for entry in entries:
+                assert "genome_id" in entry
+                assert "score" in entry
+                assert "rank" in entry
+                assert isinstance(entry["genome_id"], str)
+                assert isinstance(entry["score"], float)
+                assert isinstance(entry["rank"], int)
+
+    def test_score_range(self):
+        """All scores are in [0, 1]."""
+        result = self._run_sweep()
+        scores = result["scores"]
+        for sc_name, entries in scores.items():
+            for entry in entries:
+                assert 0.0 <= entry["score"] <= 1.0, (
+                    f"{sc_name}: genome {entry['genome_id']} "
+                    f"score={entry['score']} out of [0,1]"
+                )
+
+    def test_ranking_order(self):
+        """Scores are sorted descending; ranks are sequential from 1."""
+        result = self._run_sweep()
+        scores = result["scores"]
+        for sc_name, entries in scores.items():
+            # Scores descending
+            for i in range(len(entries) - 1):
+                assert entries[i]["score"] >= entries[i + 1]["score"], (
+                    f"{sc_name}: score[{i}]={entries[i]['score']} < "
+                    f"score[{i+1}]={entries[i+1]['score']}"
+                )
+            # Ranks sequential
+            for i, entry in enumerate(entries, start=1):
+                assert entry["rank"] == i, (
+                    f"{sc_name}: expected rank {i}, got {entry['rank']}"
+                )
+
+    def test_tie_break_deterministic(self):
+        """Identical scores are tie-broken by genome_id (lexicographic)."""
+        # Build synthetic table where all metrics are equal
+        synthetic_table = [
+            {
+                "genome_id": "ccc",
+                "scenario": "test_sc",
+                "version": "v1",
+                "base_seed_label": "test",
+                "n_vars": 10,
+                "n_iters_base": 8,
+                "metric_a": 5.0,
+                "metric_b": 3.0,
+            },
+            {
+                "genome_id": "aaa",
+                "scenario": "test_sc",
+                "version": "v1",
+                "base_seed_label": "test",
+                "n_vars": 10,
+                "n_iters_base": 8,
+                "metric_a": 5.0,
+                "metric_b": 3.0,
+            },
+            {
+                "genome_id": "bbb",
+                "scenario": "test_sc",
+                "version": "v1",
+                "base_seed_label": "test",
+                "n_vars": 10,
+                "n_iters_base": 8,
+                "metric_a": 5.0,
+                "metric_b": 3.0,
+            },
+        ]
+        result = {"table": synthetic_table}
+        scores = build_scores(result)
+        entries = scores["test_sc"]
+        # All scores equal → sorted by genome_id ascending
+        assert entries[0]["genome_id"] == "aaa"
+        assert entries[1]["genome_id"] == "bbb"
+        assert entries[2]["genome_id"] == "ccc"
+        # All scores should be 0.5 (constant metrics → neutral)
+        for entry in entries:
+            assert entry["score"] == pytest.approx(0.5)
+
+    def test_determinism(self):
+        """Repeated runs produce identical scores."""
+        genomes = [
+            {"clip_value": 1.0, "damping": 0.0},
+            {"clip_value": 5.0, "damping": 0.3},
+        ]
+        r1 = run_benchmark_stress(n_vars=10, n_iters=8, genomes=genomes)
+        r2 = run_benchmark_stress(n_vars=10, n_iters=8, genomes=genomes)
+        j1 = json.dumps(r1["scores"], sort_keys=True)
+        j2 = json.dumps(r2["scores"], sort_keys=True)
+        assert j1 == j2, "Scores are not deterministic across runs"
+
+    def test_constant_metric_handling(self):
+        """If all values for a metric are equal, no crash and scores well-defined."""
+        synthetic_table = [
+            {
+                "genome_id": "aaa",
+                "scenario": "const_sc",
+                "version": "v1",
+                "base_seed_label": "test",
+                "n_vars": 10,
+                "n_iters_base": 8,
+                "metric_x": 7.0,
+                "metric_y": 7.0,
+            },
+            {
+                "genome_id": "bbb",
+                "scenario": "const_sc",
+                "version": "v1",
+                "base_seed_label": "test",
+                "n_vars": 10,
+                "n_iters_base": 8,
+                "metric_x": 7.0,
+                "metric_y": 7.0,
+            },
+        ]
+        result = {"table": synthetic_table}
+        scores = build_scores(result)
+        entries = scores["const_sc"]
+        assert len(entries) == 2
+        for entry in entries:
+            assert entry["score"] == pytest.approx(0.5)
+            assert 0.0 <= entry["score"] <= 1.0
+
+    def test_matches_table_size(self):
+        """Per scenario: len(scores) == number of genomes in table."""
+        result = self._run_sweep()
+        scores = result["scores"]
+        table = result["table"]
+        for sc_name, entries in scores.items():
+            table_count = sum(1 for r in table if r["scenario"] == sc_name)
+            assert len(entries) == table_count, (
+                f"{sc_name}: scores has {len(entries)} entries "
+                f"but table has {table_count} rows"
+            )
